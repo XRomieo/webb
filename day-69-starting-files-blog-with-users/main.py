@@ -1,7 +1,7 @@
 from datetime import date
 from flask import Flask, abort, render_template, redirect, url_for, flash
 from flask_ckeditor import CKEditor
-from flask_login import UserMixin, login_user, LoginManager, current_user, logout_user,login_required
+from flask_login import UserMixin, login_user, LoginManager, current_user, logout_user, login_required
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import relationship, DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import Integer, String, Text, ForeignKey
@@ -11,16 +11,23 @@ import bleach
 from dotenv import load_dotenv
 import os
 
-
 # Import your forms from the forms.py
-from forms import CreatePostForm
-from forms import RegisterForm
-from forms import LoginForm
-from forms import CommentForm
+from forms import CreatePostForm, RegisterForm, LoginForm, CommentForm
 
-
+# Configure Flask app
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv("SECRET_KEY")
+app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", "fallback-secret-key-for-dev")
+
+# Configure SQLAlchemy for Vercel
+if os.environ.get("VERCEL_REGION"):
+    # Running on Vercel - use writable tmp directory
+    app.config['SQLALCHEMY_DATABASE_URI'] = "sqlite:///tmp/posts.db"
+    # Set instance path to a writable directory
+    app.instance_path = "/tmp"
+else:
+    # Local development
+    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get("DB_URI", "sqlite:///posts.db")
+
 ckeditor = CKEditor(app)
 login_manager = LoginManager()
 login_manager.init_app(app)
