@@ -1,5 +1,5 @@
 from datetime import date
-from flask import Flask, abort, render_template, redirect, url_for, flash
+from flask import Flask, abort, render_template, redirect, request, url_for, flash
 from flask_ckeditor import CKEditor
 from flask_login import UserMixin, login_user, LoginManager, current_user, logout_user, login_required
 from flask_sqlalchemy import SQLAlchemy
@@ -77,13 +77,13 @@ class Comment(db.Model):
 
 @login_manager.user_loader
 def load_user(user_id):
-    return User.query.get(int(user_id))
+    return db.session.get(User, int(user_id))
 
 def author_only(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         post_id = kwargs.get('post_id') or (args[0] if args else None)
-        post = BlogPost.query.get(post_id)
+        post = db.session.get(BlogPost, post_id)
 
         if not current_user.is_authenticated:
             abort(403)
@@ -95,13 +95,15 @@ def author_only(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# Create tables
-try:
-    with app.app_context():
-        db.create_all()
-except Exception as e:
-    print(f"Error creating tables: {e}")
-
+# Create tables - with safeguard against multiple initialization
+with app.app_context():
+    try:
+        # Check if tables already exist before creating
+        inspector = db.inspect(db.engine)
+        if not inspector.has_table('users'):
+            db.create_all()
+    except Exception as e:
+        print(f"Error with database: {e}")
 
 
 @app.route('/register',methods=["POST","GET"])
@@ -163,21 +165,27 @@ def get_all_posts():
 
 
 @app.route("/post/<int:post_id>", methods=["GET", "POST"])
-@login_required
 def show_post(post_id):
-    post = BlogPost.query.get(post_id)
+    post = db.session.get(BlogPost, post_id)
     form = CommentForm()
     if form.validate_on_submit():
+        if not current_user.is_authenticated:
+            flash("You need to login or register to comment.")
+            return redirect(url_for("login"))
+            
         cleaned_comment = bleach.clean(form.comment_text.data,tags=['p', 'b', 'i', 'u', 'em', 'strong', 'a', 'br'],attributes={'a': ['href', 'title']},strip=True)
-        new_comment = Comment( text=cleaned_comment,comment_author=current_user, parent_post=post )
+        new_comment = Comment(text=cleaned_comment,comment_author=current_user, parent_post=post)
         db.session.add(new_comment)
         db.session.commit()
         return redirect(url_for('show_post', post_id=post.id))
     return render_template("post.html", post=post, form=form)
 
 @app.route("/new-post", methods=["GET", "POST"])
-@author_only
+@login_required
 def add_new_post():
+    if not current_user.is_admin():
+        abort(403)
+        
     form = CreatePostForm()
     if form.validate_on_submit():
         new_post = BlogPost(
@@ -203,7 +211,6 @@ def edit_post(post_id):
         title=post.title,
         subtitle=post.subtitle,
         img_url=post.img_url,
-        author=post.author.name,
         body=post.body
     )
     if edit_form.validate_on_submit():
@@ -220,11 +227,7 @@ def edit_post(post_id):
 @app.route("/delete/<int:post_id>")
 @author_only
 def delete_post(post_id):
-    post_to_delete = db.get_or_404(BlogPost, post_id)
-    # Manually delete related comments (optional if cascade is set up)
-    for comment in post_to_delete.comments:
-        db.session.delete(comment)
-
+    post_to_delete = db.session.get(BlogPost, post_id)
     db.session.delete(post_to_delete)
     db.session.commit()
     return redirect(url_for('get_all_posts'))
@@ -235,11 +238,19 @@ def about():
     return render_template("about.html")
 
 
-@app.route("/contact")
+@app.route("/contact", methods=["GET", "POST"])
 def contact():
-    return render_template("contact.html")
+    if request.method == "POST":
+        # Process the form data here (e.g., send an email)
+        return render_template("contact.html", msg_sent=True)
+    return render_template("contact.html", msg_sent=False)
 
 
+# This handler is needed for Vercel
+@app.route('/<path:path>')
+def catch_all(path):
+    return redirect(url_for('get_all_posts'))
+
+# Only run the app if this file is executed directly (not imported)
 if __name__ == "__main__":
     app.run(debug=False)
-

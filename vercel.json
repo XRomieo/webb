@@ -11,6 +11,7 @@
         "dest": "main.py"
     }],
     "env": {
-        "FLASK_ENV": "production"
+        "FLASK_ENV": "production",
+        "VERCEL_FILESYSTEM_CACHE": "1"
     }
 }
