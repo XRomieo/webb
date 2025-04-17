@@ -10,97 +10,113 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import bleach
 from dotenv import load_dotenv
 import os
+import sys
 
 # Import your forms from the forms.py
 from forms import CreatePostForm, RegisterForm, LoginForm, CommentForm
 
-# Configure Flask app
-app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", "fallback-secret-key-for-dev")
-
-# Configure SQLAlchemy for Vercel
-if os.environ.get("VERCEL_REGION"):
-    # Running on Vercel - use writable tmp directory
-    app.config['SQLALCHEMY_DATABASE_URI'] = "sqlite:///tmp/posts.db"
-    # Set instance path to a writable directory
-    app.instance_path = "/tmp"
+# Prevent duplicate application loading
+if 'main' in sys.modules:
+    app = sys.modules['main'].app
 else:
-    # Local development
-    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get("DB_URI", "sqlite:///posts.db")
+    # Configure Flask app
+    app = Flask(__name__)
+    app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", "fallback-secret-key-for-dev")
 
-ckeditor = CKEditor(app)
-login_manager = LoginManager()
-login_manager.init_app(app)
+    # Configure SQLAlchemy for Vercel
+    if os.environ.get("VERCEL_REGION"):
+        # Running on Vercel - use writable tmp directory
+        app.config['SQLALCHEMY_DATABASE_URI'] = "sqlite:///tmp/posts.db"
+        # Set instance path to a writable directory
+        app.instance_path = "/tmp"
+    else:
+        # Local development
+        app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get("DB_URI", "sqlite:///posts.db")
 
-@login_manager.user_loader
-def load_user(user_id):
-    return User.query.get(int(user_id))
-
-def author_only(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        post_id = kwargs.get('post_id') or (args[0] if args else None)
-        post = BlogPost.query.get(post_id)
-
-        if not current_user.is_authenticated:
-            abort(403)
-
-        # ✅ Allow admin OR post author
-        if current_user.id != 1 and post.author_id != current_user.id:
-            abort(403)
-
-        return f(*args, **kwargs)
-    return decorated_function
+    ckeditor = CKEditor(app)
+    login_manager = LoginManager()
+    login_manager.init_app(app)
 
 # CREATE DATABASE
 class Base(DeclarativeBase):
     pass
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get("DB_URI", "sqlite:///posts.db")
-db = SQLAlchemy(model_class=Base)
-db.init_app(app)
+
+# Check if db has already been initialized
+try:
+    db
+except NameError:
+    db = SQLAlchemy(model_class=Base)
+    db.init_app(app)
+
+# The rest of your code should remain the same, but we need to make sure we don't
+# create model classes twice
+
+# Define models only if they don't exist yet
+if 'User' not in globals():
+    @login_manager.user_loader
+    def load_user(user_id):
+        return User.query.get(int(user_id))
+
+    def author_only(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            post_id = kwargs.get('post_id') or (args[0] if args else None)
+            post = BlogPost.query.get(post_id)
+
+            if not current_user.is_authenticated:
+                abort(403)
+
+            # ✅ Allow admin OR post author
+            if current_user.id != 1 and post.author_id != current_user.id:
+                abort(403)
+
+            return f(*args, **kwargs)
+        return decorated_function
+
+    # CONFIGURE TABLES
+    class User(db.Model, UserMixin):
+        __tablename__ = "users"
+
+        id: Mapped[int] = mapped_column(primary_key=True)
+        email: Mapped[str] = mapped_column(String(100), unique=True)
+        password: Mapped[str] = mapped_column(String(100))
+        name: Mapped[str] = mapped_column(String(1000))
+
+        posts: Mapped[list["BlogPost"]] = relationship("BlogPost", back_populates="author")
+        comments = relationship("Comment", back_populates="comment_author")
+        def is_admin(self):
+            return self.id == 1
 
 
-# CONFIGURE TABLES
-class User(db.Model, UserMixin):
-    __tablename__ = "users"
+    class BlogPost(db.Model):
+        __tablename__ = "blog_posts"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True)
+        title: Mapped[str] = mapped_column(String(250), unique=True, nullable=False)
+        subtitle: Mapped[str] = mapped_column(String(250), nullable=False)
+        date: Mapped[str] = mapped_column(String(250), nullable=False)
+        body: Mapped[str] = mapped_column(Text, nullable=False)
+        img_url: Mapped[str] = mapped_column(String(250), nullable=False)
+        author_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+        author: Mapped["User"] = relationship(back_populates="posts")
+        comments = relationship("Comment", back_populates="parent_post", cascade="all, delete")
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    email: Mapped[str] = mapped_column(String(100), unique=True)
-    password: Mapped[str] = mapped_column(String(100))
-    name: Mapped[str] = mapped_column(String(1000))
+    class Comment(db.Model):
+        __tablename__ = "comments"
 
-    posts: Mapped[list["BlogPost"]] = relationship("BlogPost", back_populates="author")
-    comments = relationship("Comment", back_populates="comment_author")
-    def is_admin(self):
-        return self.id == 1
-
-
-class BlogPost(db.Model):
-    __tablename__ = "blog_posts"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    title: Mapped[str] = mapped_column(String(250), unique=True, nullable=False)
-    subtitle: Mapped[str] = mapped_column(String(250), nullable=False)
-    date: Mapped[str] = mapped_column(String(250), nullable=False)
-    body: Mapped[str] = mapped_column(Text, nullable=False)
-    img_url: Mapped[str] = mapped_column(String(250), nullable=False)
-    author_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
-    author: Mapped["User"] = relationship(back_populates="posts")
-    comments = relationship("Comment", back_populates="parent_post", cascade="all, delete")
-
-class Comment(db.Model):
-    __tablename__ = "comments"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    text: Mapped[str] = mapped_column(Text, nullable=False)
-    author_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
-    comment_author: Mapped["User"] = relationship("User", back_populates="comments")
-    post_id: Mapped[int] = mapped_column(ForeignKey("blog_posts.id"))
-    parent_post: Mapped["BlogPost"] = relationship("BlogPost", back_populates="comments")
+        id: Mapped[int] = mapped_column(primary_key=True)
+        text: Mapped[str] = mapped_column(Text, nullable=False)
+        author_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+        comment_author: Mapped["User"] = relationship("User", back_populates="comments")
+        post_id: Mapped[int] = mapped_column(ForeignKey("blog_posts.id"))
+        parent_post: Mapped["BlogPost"] = relationship("BlogPost", back_populates="comments")
 
 
-
+# Create tables in a way that handles multiple app loads
 with app.app_context():
-    db.create_all()
+    try:
+        db.create_all()
+    except Exception as e:
+        print(f"Error creating tables: {e}")
 
 
 
